@@ -1,0 +1,5 @@
+package hello
+
+export def hello =
+    "hello"
+
