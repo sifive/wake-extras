@@ -1,0 +1,533 @@
+package query
+
+## Helpers that will soon be in the standard library.
+
+export def single (x: a): List a =
+    x, Nil
+
+## Error tracking
+
+# Associate an `Error` report with the path taken to isolate the failing input from surrounding data.
+#
+# This will very rarely need to be inspected outside of a `query*` chain, but is very helpful when
+# *writing* the combinators in libraries built on top of that API.
+export tuple QueryError =
+    # The current location of the "cursor" within whatever data is being fed to the `query`.
+    #
+    # This is organized as a FILO stack -- the `head` of the list is the most recent ancestor of the
+    # current location.
+    export Path: List QueryPathComponent
+    # The underlying failure thrown within the `query` evaluation.
+    export Raised: Error
+
+# Wrap a specific message with the metadata required for a `query` failure (see also: `makeError`).
+export def makeQueryError (cause: String): QueryError =
+    QueryError Nil cause.makeError
+
+# A typed representation of each step taken deeper into the data passed to a `query`.
+#
+# These constructors relate to how the final path will be rendered independently from the underlying
+# data structure, but should be chosen to be clear and intuitive within any given library buit on
+# top of `query`.  They *don't* need to be used for the same purposes between different libraries --
+# for example, the data model of CLI arguments is very different than that of JSON, and the two
+# don't need to be implemented identically so long as each is individually *internally* consistent.
+export data QueryPathComponent =
+    # Either the very start of a `query`, or a distinct enough context switch to break the rendered
+    # "path" into two parts; for example a CLI argument (#1) which contains JSON to be parsed (#2).
+    PathRoot
+    # Add a segment separated by `/`.  Often a step "down" into a subset of the data being queried.
+    PathSlash String
+    # Add a segment separated by `.`.  Often some property inherent to the currently-focused data.
+    PathDot String
+    # Indicate selection of a specific element in an ordered collection, as chosen by its position.
+    PathIndex Integer
+
+# Join sequences of steps into some data into a textual representation for ease of reference.
+#
+# Multiple sequences are broken up by the presence of one or more `PathRoot` markers, and each such
+# sequence of non-`PathRoot` steps corresponds to one `String` in the output.  To avoid unnecessary
+# `.:` appearing in the output, any sequence comprised of *only* a `PathRoot` and nothing else is
+# removed; with the exception that if the entire `path` is comprised of nothing but (one or more)
+# `PathRoot` markers, the output will still contain a single entry, thus `(".", Nil)`.
+#
+# `atTop` is used to implement the above behaviour, and should always be set to `True` when this is
+# *not* being invoked recursively.
+def renderQueryPathSegments (path: List QueryPathComponent) (atTop: Boolean): List String =
+    def stripUnnecessaryRoots atTopInner test = match test
+        PathRoot, PathRoot, ps -> stripUnnecessaryRoots False (PathRoot, ps)
+        PathRoot, Nil if !(atTop || atTopInner) -> Nil
+        _ -> test
+
+    require p, ps = stripUnnecessaryRoots atTop path
+    else Nil
+
+    def current = match p
+        PathRoot -> "."
+        PathSlash k -> "/{k}"
+        PathDot n -> ".{n}"
+        PathIndex i -> "[{str i}]"
+
+    def (active; remainder) = match ps.head
+        Some PathRoot -> ""; renderQueryPathSegments ps False
+        _ -> match (renderQueryPathSegments ps False)
+            Nil -> ""; Nil
+            r, rs -> r; rs
+
+    "{current}{active}", remainder
+
+# Join sequences of steps into some data into a textual representation for ease of reference.
+#
+# Multiple sequences are broken up by the presence of one or more `PathRoot` markers, and each such
+# sequence of non-`PathRoot` steps is separated by a colon-space in the output (`"./seq1: .[2]"`).
+export def renderQueryPaths (path: List QueryPathComponent): String =
+    renderQueryPathSegments path True
+    | catWith ": "
+
+# Flatten a `query`-combinator error into the more standard type as used across the rest of Wake.
+#
+# The path as described in `renderQueryPaths` is prepended to the error message for context.
+export def renderQueryError (qError: QueryError): Error =
+    def QueryError path error = qError
+    def pathString = renderQueryPaths path
+
+    match path
+        Nil -> error
+        _ -> editErrorCause ("{pathString}: {_}") error
+
+# For use in implementing new `query` combinators: append the indicated step to the path searched so far.
+export def qPathAnnotation (step: QueryPathComponent) (getFn: a => Result b QueryError) (input: a): Result b QueryError =
+    getFn input
+    | rmapFail (Fail $ editQueryErrorPath (step, _) _)
+
+## Query processors
+
+# Starts off a "query" that will be chained togethor by
+# '$' operators. If your query returns a list of objects
+# and yet you expect to have exactly one result, prefer
+# using `queryOne`. `query` is used for both getters
+# and editors.
+#
+# Parameters:
+#   - `toQuery`: The object to query
+#   - `queryFn`: The query itself
+#
+# Examples:
+# ```
+#   query person $ jField "name" $ jString = Pass ("Alice", Nil) # fetch a name
+#   query person $ jEditField "age" $ jEditInteger (_+1) # Have a birthday
+# ```
+export def query (toQuery: a) (queryFn: a => Result b QueryError): Result b Error =
+    match (qPathAnnotation PathRoot queryFn toQuery)
+        Pass x -> Pass x
+        Fail err -> Fail (renderQueryError err)
+
+# Starts off a "query" that will be chained togethor by '$' operators.
+# `queryEmpty` demands that the query return a list, and determines whether the
+# query matched any object in the search domain (i.e. the list is non-empty).
+# You most likely do *not* want to use `queryExists` with an editor.
+#
+# *Parameters:*
+#   - `toQuery`: The object to query
+#   - `queryFn`: The query itself
+#
+# *Examples:*
+#   ```
+#   `queryLast nonEmptyPeople $ jField "name" $ jString = Pass True
+#   `queryLast people $ jField "tailLength" $ jString = Pass False
+#   ```
+export def queryExists (toQuery: a) (queryFn: a => Result (List b) QueryError): Result Boolean Error =
+    query toQuery queryFn
+    | rmap (!_.empty)
+
+# Starts off a "query" that will be chained togethor by
+# '$' operators. `queryOne` demands that the query return
+# a list and that that list be a singelton. If there
+# are no values or there are multiple values, an error
+# is returned. You most likely do *not* want to use
+# `queryOne` with an editor.
+#
+# Parameters:
+#   - `toQuery`: The object to query
+#   - `queryFn`: The query itself
+#
+# Examples:
+# ```
+#   queryOne person $ jField "name" $ jString = Pass "Alice" # fetch a name
+#   queryOne order $ jField "frysWithThat" $ jBoolean = Pass ("Alice", Nil) # fetch a name
+# ```
+export def queryOne (toQuery: a) (queryFn: a => Result (List b) QueryError): Result b Error =
+    require Pass result = query toQuery queryFn
+
+    match result
+        Nil -> failWithError "Expected 1 match from query, but got none"
+        x, Nil -> Pass x
+        otherwise ->
+            # We use format but we have to take care to make sure the message isn't too long
+            def shortMsg =
+                map format otherwise
+                | catWith ", "
+
+            def takeMsg =
+                take 3 otherwise
+                | map format
+                | catWith ", "
+                | ("{_}, ...")
+
+            def maxLen = 128
+
+            # We check the length of the string as a rough measure of how readable
+            # the output will be. We're just trying to make the best choice but
+            # no choice is perfect.
+            if len (explode shortMsg) < maxLen then
+                failWithError "Expected 1 match from query, but got {shortMsg}"
+            else if len (explode takeMsg) < maxLen then
+                failWithError "Expected 1 match from query, but got {takeMsg}"
+            else
+                failWithError "Expected 1 match from query, but got {len otherwise | str}"
+
+# Starts off a "query" that will be chained togethor by
+# '$' operators. `queryOptional` demands that the query
+# return a list and that that list be either empty or
+# a singelton. If there is more than one value, an error
+# is returned. You most likely do *not* want to use
+# `queryOptional` with an editor.
+#
+# Parameters:
+#   - `toQuery`: The object to query
+#   - `queryFn`: The query itself
+#
+# Examples:
+# ```
+#   queryOptional person $ jField "name" $ jString = Pass (Some "Alice")
+#   queryOptional order $ jFieldOpt "frysWithThat" $ jBoolean = Pass (Some True)
+#   queryOptional person $ jFieldOpt "ethnicity" $ jString = Pass None # Prefer not to say
+# ```
+export def queryOptional (toQuery: a) (queryFn: a => Result (List b) QueryError): Result (Option b) Error =
+    require Pass result = query toQuery queryFn
+
+    match result
+        Nil -> Pass None
+        x, Nil -> Pass (Some x)
+        otherwise ->
+            # We use format but we have to take care to make sure the message isn't too long
+            def shortMsg =
+                map format otherwise
+                | catWith ", "
+
+            def takeMsg =
+                take 3 otherwise
+                | map format
+                | catWith ", "
+                | ("{_}, ...")
+
+            def maxLen = 128
+
+            # We check the length of the string as a rough measure of how readable
+            # the output will be. We're just trying to make the best choice but
+            # no choice is perfect.
+            if len (explode shortMsg) < maxLen then
+                failWithError "Expected 0 or 1 matches from query, but got {shortMsg}"
+            else if len (explode takeMsg) < maxLen then
+                failWithError "Expected 0 or 1 matches from query, but got {takeMsg}"
+            else
+                failWithError "Expected 0 or 1 matches from query, but got {len otherwise | str}"
+
+# Starts off a "query" that will be chained togethor by '$' operators.
+# `queryLast` demands that the query return a list and that that list not be
+# empty. If there is more than one value, the final element in the list is
+# returned. You most likely do *not* want to use `queryLast` with an editor.
+#
+# *Parameters:*
+#   - `toQuery`: The object to query
+#   - `queryFn`: The query itself
+#
+# *Examples:*
+#   ```
+#   `queryLast people $ jField "name" $ jString = Pass "Zach"`
+#   `queryLast emptyPeople $ jField "name" $ jString = Fail "Expected at least 1 match from query, but got none" Nil`
+#   ```
+export def queryLast (toQuery: a) (queryFn: a => Result (List b) QueryError): Result b Error =
+    require Pass last = queryLastOptional toQuery queryFn
+
+    last
+    | getOrFail "Expected at least 1 match from query, but got none".makeError
+
+# Starts off a "query" that will be chained togethor by '$' operators.
+# `queryLastOptional` demands that the query return a list. If there is more
+# than one value, the final element in the list is returned. You most likely do
+# *not* want to use `queryLastOptional` with an editor.
+#
+# *Parameters:*
+#   - `toQuery`: The object to query
+#   - `queryFn`: The query itself
+#
+# *Examples:*
+#   ```
+#   `queryLastOptional people $ jField "name" $ jString = Pass (Some "Zach")`
+#   `queryLastOptional emptyPeople $ jField "name" $ jString = Pass None`
+#   ```
+export def queryLastOptional (toQuery: a) (queryFn: a => Result (List b) QueryError): Result (Option b) Error =
+    def lastFn =
+        queryFn _
+        | rmap (reverse _ | head)
+
+    query toQuery
+    $ lastFn
+
+## Query combinators
+
+# A helper function for turning an error-free function into
+# an always-passing error handeling function. This is useful
+# for turning simple error free functions like (_+1) into
+# functions that can compose with editors. You can use this
+# in a '$' chain right before a simple error-free function
+# as a terminator.
+#
+# Parameters:
+#  - `editFn`: The error-free edit function
+export def qPass (editFn: a => b): a => Result b QueryError =
+    _
+    | editFn
+    | Pass
+
+# A helper function for integrating potentially-failing functions not designed
+# for the query API into a `$` chain.
+#
+# Notably, this will ensure that the path pointed to by a failing query (e.g. `./bar[0]`) is
+# properly separated from any failure message in the `fn`.  Because of this, it can be used to
+# divide a single `query` pipeline into two separate contexts; see the final example below.
+#
+# Parameters:
+#  - `fn`: The function that accesses a subpart of or otherwise processes `input`
+#  - `input`: The input to be processed
+#
+# Examples:
+#  - ```wake
+#    require Pass input = parseJSONBody '{"fruit":"apple","color":"red"}'
+#    query input $ qField "color" $ qStringFn $ qExtern parseColorName = Pass Red
+#    query input $ qField "fruit" $ qStringFn $ qExtern parseColorName = Fail "./fruit: 'apple' is not a known color"
+#    ```
+#  - ```wake
+#    query argumentList
+#    $ qArgument "--input-json"
+#    $ qArgValue
+#    $ qExtern parseJSONBody
+#    $ jField "name"
+#    $ jString
+#    ```
+#    When given an argument `--input-json='{"name":null}'` would fail with the error
+#    `--input-json[value]: ./name: not a string (got null)`
+export def qExtern (fn: a => Result b Error) (input: a): Result b QueryError =
+    fn input
+    | rmapFail (Fail $ QueryError (PathRoot, Nil) _)
+
+# A helper function for integrating functions not designed for the query API into a `$` chain.
+#
+# This is a simple wrapper around `qExtern` to allow the cleaner `qExternPass fn` rather than having
+# to explicitly specify `qExtern (fn _ | Pass)` when the transformation is guaranteed to succeed.
+#
+# Parameters:
+#  - `fn`: The function that accesses a subpart of or otherwise processes `input`
+#  - `input`: The input to be processed
+export def qExternPass (fn: a => b) (input: a): Result b QueryError =
+    Pass (fn input)
+
+# A helper function for terminating complex queries which require a List wrapper.
+# Can be used to terminate a '$' chain.
+#
+# Parameters:
+#  - `input`: The input to be wrapped in a Pass and singleton list
+export def qSingle (getFn: a => Result b QueryError): (input: a) => Result (List b) QueryError =
+    getFn _
+    | rmap single
+
+# A helper function for terminating complex queries. It
+# can be thought of as the most generic terminal getter.
+# Can be used to terminate a '$' chain.
+#
+# Parameters:
+#  - `input`: The input to be wrapped in a Pass and singleton list
+export def qSinglePass: (input: a) => Result (List a) QueryError =
+    qSingle
+    $ Pass
+
+# A getter that filters a query to a subset of values.
+# This can be used to check if a value meets a certain
+# criteria before performing some operation on it. For
+# instance you might check the .type field is "foo"
+# before accessing a separate field that only type "foo"
+# objects have.
+#
+# Parameters:
+#  - `selectFn`: The predicate that determines if `getFn` should be applied
+#  - `getFn`: The function that accesses a subpart of `input`
+#  - `input`: The JValue to optionally access
+#
+# Examples:
+# ```
+#   # Only get the object if .type == "foo"
+#   query object
+#   $ qIf (queryOne _ $ jField "type" $ jEqStr "foo")
+#   $ getSinglePass
+#
+#   # get all .bar fields only if .type == "foo"
+#   query objects
+#   $ jFlatten
+#   $ qIf (queryOne _ $ jField "type" $ jEqStr "foo")
+#   $ jField "bar"
+#   $ jInteger
+# ```
+export def qIf (selectFn: a => Result Boolean Error) (getFn: a => Result (List b) QueryError) (input: a): Result (List b) QueryError =
+    match (selectFn input)
+        Pass True -> getFn input
+        Pass False -> Pass Nil
+        Fail err ->
+            editErrorCause ("query predicate failed: {_}") err
+            | QueryError Nil
+            | Fail
+
+# An editor that only applies the edit if its input
+# satisfies a predicate. You can use this to avoid
+# editing values that would otherwise cause an error.
+#
+# Parameters:
+#  - `selectFn`: The predicate that must be satisfied for an edit to occur
+#  - `editFn`: The edit function to apply if `selectFn` is true
+#  - `input`: The input to edit if it satisfies `selectFn`
+#
+# Examples:
+# ```
+#   # update all .bar fields only if .type == "foo"
+#   query objects
+#   $ jEditFlatten
+#   $ qEditIf (queryOne _ $ jField "type" $ jEqStr "foo")
+#   $ jEditField "bar"
+#   $ jEditInteger (_+1)
+# ```
+export def qEditIf (selectFn: a => Result Boolean Error) (editFn: a => Result a QueryError) (input: a): Result a QueryError =
+    match (selectFn input)
+        Pass True -> editFn input
+        Pass False -> Pass input
+        Fail err ->
+            editErrorCause ("query predicate failed: {_}") err
+            | QueryError Nil
+            | Fail
+
+# A getter that pulls out all the values of a list. You
+# can think of this like `[]` in jq.
+#
+# Parameters:
+#  - `getFn`: The function that consumes each element of a list
+#  - `input`: The list containing values to apply `getFn` to
+#
+# Examples:
+# ```
+#   query people $ qFlatten $ qSingle getPersonFriends = Pass ("Alice", "Bob", "Carol", Nil)
+# ```
+export def qFlatten (getFn: a => Result (List b) QueryError) (list: List a): Result (List b) QueryError =
+    def helper i = match _
+        Nil -> Pass Nil
+        k, l ->
+            def subr = helper (i + 1) l
+
+            require Pass l = qPathAnnotation (PathIndex i) getFn k
+            require Pass subl = subr
+
+            Pass (l ++ subl)
+
+    helper 0 list
+
+# An editor for lists that edits each element contained
+#
+# Parameters:
+#  - `editFn`: The function that modifies each element of a list
+#  - `input`: The list to have its elements modified
+#
+# Examples:
+# ```
+#   query ints $ qEditFlatten (_+1) # Add 1 to every integer in an array
+#   query ("foo", Nil) $ qEditFlatten (_+1) # Type error (String vs. Integer)
+# ```
+export def qEditFlatten (editFn: a => Result b QueryError) (list: List a): Result (List b) QueryError =
+    def helper i = match _
+        Nil -> Pass Nil
+        k, l ->
+            def subr = helper (i + 1) l
+
+            require Pass l = qPathAnnotation (PathIndex i) editFn k
+            require Pass subl = subr
+
+            Pass (l, subl)
+
+    require Pass newList = helper 0 list
+
+    Pass newList
+
+# Get the element at a specific position in the (zero-indexed) list.
+# A error will be produced if the index is below 0 or if it points beyond the
+# final element.
+#
+# *Parameters:*
+#   - `index`: The index of the specific element you want to access
+#   - `getFn`: The function that consumes the specific element
+#   - `input`: The `List` to fetch a value from
+#
+# *Examples:*
+#   ```
+#   query (explode "abcd") $ qAt 2 $ Pass = Pass "c"
+#   query Nil $ qAt 2 $ Pass = Fail (Error ".[2]: index out of bounds" Nil)
+#   ```
+export def qAt (index: Integer) (getFn: a => Result b QueryError) (input: List a): Result b QueryError =
+    def helper _ =
+        require Pass elem =
+            at index input
+            | getOrFail "index out of bounds (only {str input.len} in list)".makeQueryError
+
+        getFn elem
+
+    qPathAnnotation (PathIndex index) helper input
+
+# Edit the element at a specific position in the (zero-indexed) list.
+# A error will be produced if the index is below 0 or if it points beyond the
+# final element.
+#
+# Parameters:
+#  - `index`: The index of the specific element you want to access
+#  - `editFn`: The function that edits the specific element
+#  - `input`: The list to edit a single value in
+#
+# Examples:
+# ```
+#   query names $ jEditAt 1 $ jEditString ("_ {lastName}") # Add lastName to name mat index 1
+#   query (JArray (x, y, z, Nil)) $ jEditAt 7 $ fn = Fail (Error ".[7]: out of bounds" Nil)
+#   query (JString "foo") $ jEditAt 3 $ fn = Fail (Error ".: not an array" Nil)
+# ```
+export def qEditAt (index: Integer) (editFn: a => Result a QueryError) (input: List a): Result (List a) QueryError =
+    match (splitAt index input)
+        Pair first (x, follow) ->
+            require Pass ex = qPathAnnotation (PathIndex index) editFn x
+
+            Pass (first ++ (ex, follow))
+        _ ->
+            Fail "index out of bounds ({str index} with only {str input.len} in list)".makeQueryError
+
+# A getter that wraps a further query to provide a fallback. If no value is
+# returned from the inner getter, the supplied default value is used instead.
+#
+# Parameters:
+#  - `default`: The default value to use if the value is missing
+#  - `getFn`: The function that consumes the value of the query object
+#  - `input`: The JValue containing an object to access the value of
+#
+# Examples:
+# ```
+#   query (JArray (JString "inner", Nil)) $ qDefault ("fallback", Nil) $ jFlatten $ jString = Pass ("inner", Nil)
+#   query (JArray Nil) $ qDefault ("fallback", Nil) $ jFlatten $ jString = Pass ("fallback", Nil)
+#   query (JArray (JBoolean True, Nil)) $ qDefault ("fallback", Nil) $ jFlatten $ jString = Fail (Error ".[0]: not a string" Nil)
+# ```
+export def qDefault (default: List a) (getFn: in => Result (List a) QueryError) (input: in): Result (List a) QueryError =
+    require Pass result = getFn input
+
+    match result
+        Nil -> Pass default
+        _ -> Pass result
