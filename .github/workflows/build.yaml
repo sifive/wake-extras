@@ -18,7 +18,7 @@ jobs:
           run: ls -lah .
 
         - name: Install wake
-          run: sudo apt-get install ubuntu-22-04-wake_39.1.0-1_amd64.deb
+          run: sudo apt-get install ./ubuntu-22-04-wake_39.1.0-1_amd64.deb
 
         - name: Placeholder
           run: wake -x 'Unit'
