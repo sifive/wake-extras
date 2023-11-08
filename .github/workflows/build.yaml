@@ -19,9 +19,6 @@ jobs:
         - name: Download wake
           run: wget https://github.com/sifive/wake/releases/download/v39.1.0/ubuntu-22-04-wake_39.1.0-1_amd64.deb
 
-        - name: ls
-          run: ls -lah .
-
         - name: Install wake
           run: sudo apt-get install ./ubuntu-22-04-wake_39.1.0-1_amd64.deb
 
