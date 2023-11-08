@@ -1,0 +1,21 @@
+name: "Run Tests"
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+    test:
+      runs-on: ubuntu-22.04
+      name: Run Tests
+      steps:
+        - name: Download wake
+          run: wget https://github.com/sifive/wake/releases/download/v39.1.0/ubuntu-22-04-wake_39.1.0-1_amd64.deb
+
+        - name: Install wake
+          run: sudo apt install ubuntu-22-04-wake_39.1.0-1_amd64.deb
+
+        - name: Placeholder
+          run: wake -x 'Unit'
