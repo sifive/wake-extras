@@ -11,6 +11,11 @@ jobs:
       runs-on: ubuntu-22.04
       name: Run Tests
       steps:
+        - name: Clone wake-extras
+          uses: actions/checkout@v3
+          with:
+            fetch-depth: 0
+
         - name: Download wake
           run: wget https://github.com/sifive/wake/releases/download/v39.1.0/ubuntu-22-04-wake_39.1.0-1_amd64.deb
 
@@ -20,5 +25,8 @@ jobs:
         - name: Install wake
           run: sudo apt-get install ./ubuntu-22-04-wake_39.1.0-1_amd64.deb
 
-        - name: Placeholder
-          run: wake -x 'Unit'
+        - name: Initialize wake
+          run: wake --init .
+
+        - name: Run basic test
+          run: wake --in query -x 'single 5'
