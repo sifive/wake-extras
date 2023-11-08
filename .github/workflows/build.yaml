@@ -28,5 +28,8 @@ jobs:
         - name: Initialize wake
           run: wake --init .
 
+        - name: Check formatting
+          run: wake-format --dry-run --auto
+
         - name: Run basic test
           run: wake --in query -x 'single 5'
