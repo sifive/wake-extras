@@ -1,0 +1,1305 @@
+package json
+
+from wake import _
+from utils import prefixError
+from query import _
+
+# Anyone who depends on json will also
+# need query functions.
+from query export def single query queryExists queryOne queryOptional queryLast queryLastOptional
+from query export def qPass qExtern qExternPass qSingle qSinglePass qIf qEditIf qFlatten qEditFlatten qAt qEditAt qDefault
+from query export type QueryError
+from query export def QueryError makeQueryError
+
+## Helpers that will soon be in the standard library. This will not be exported here.
+
+def lookup (selectFn: a => Boolean): (list: List (Pair a b)) => List b =
+    def select (Pair key value) =
+        if selectFn key then
+            Some value
+        else
+            None
+
+    mapPartial select
+
+## JSON combinators
+
+# Helper function to uniformly construct error messages for mismatched types.
+def renderActualJValue (got: JValue): String =
+    def renderTypeFailure (got: JValue): String = match got
+        JNull -> "null"
+        # TODO: This should only print out a reasonable head of the string, to avoid over-long lines.
+        JString s -> format s
+        JInteger i -> str i
+        JBoolean b -> format b
+        JDouble d -> dstr d
+        JObject ks -> "object with {str ks.len} keys"
+        JArray vs -> "array with {str vs.len} elements"
+
+    "(got {renderTypeFailure got})"
+
+# A getter for JNull. Can be used to execute a function when a null is present.
+#
+# Parameters:
+#  - `getFn`: The function that consumes the null if present
+#  - `input`: The JValue to gate the function on
+#
+# Examples:
+# ```
+#   def isValid Unit = Pass Unit
+#   query JNull $ jNullFn isValid = Pass Unit
+#   query (JInteger 10) $ jNullFn isValid = Fail (Error ".: not a null" Nil)
+# ```
+export def jNullFn (getFn: Unit => Result a QueryError) (input: JValue): Result a QueryError =
+    match input
+        JNull -> getFn Unit
+        _ -> Fail "not a null {renderActualJValue input}".makeQueryError
+
+# An editor for JNull. Can be used to replace a null with some other value.
+#
+# Parameters:
+#  - `editFn`: The function that modifies the assumed null
+#  - `input`: The JValue to be modified
+#
+# Examples:
+# ```
+#   def insertString Unit = Pass (JString "previously null")
+#   query JNull $ jSetNullFn insertString = Pass (JString "previouslyNull")
+#   query (JInteger 10) $ jSetNullFn insertString = Fail (Error ".: not a null" Nil)
+# ```
+export def jSetNullFn (editFn: Unit => Result JValue QueryError) (input: JValue): Result JValue QueryError =
+    match input
+        JNull -> editFn Unit
+        _ -> Fail "not a null {renderActualJValue input}".makeQueryError
+
+# A getter for JString. Can be used to access strings in json.
+# If possible for your case consider using jString instead.
+#
+# Parameters:
+#  - `getFn`: The function that consumes the string if present
+#  - `input`: The JValue to get the string of
+#
+# Examples:
+# ```
+#   def toInt s = match (int s)
+#       Some x = Pass x
+#       None   = failWithError "'{s}' is not an integer"
+#   query (JString "10") $ jStringFn toInt = Pass 10
+#   query (JInteger 10) $ jStringFn toInt = Fail (Error ".: not a string" Nil)
+#   query person $ jField "age" $ jStringFn toInt = Pass 10 # If age is stored as a string
+#   query person $ jField "name" $ jStringFn toInt = Fail (Error "./name: 'Alice' is not an integer" Nil)
+# ```
+export def jStringFn (getFn: String => Result a QueryError) (input: JValue): Result a QueryError =
+    match input
+        JString s -> getFn s
+        _ -> Fail "not a string {renderActualJValue input}".makeQueryError
+
+# A terminal getter for JString. Can be used to access strings in json.
+# Can be used at the end of a '$' chain.
+#
+# Parameters:
+#  - `input`: The JValue to get the string of
+#
+# Examples:
+# ```
+#   query (JString "foo") $ jString = Pass ("foo", Nil)
+#   query (JInteger 10) $ jString = Fail (Error ".: not a string" Nil)
+#   queryOne person $ jField "name" $ jString = Pass "Alice"
+#   queryOne person $ jField "age" $ jString = Fail (Error ".age: not a string" Nil)
+# ```
+export def jString: (input: JValue) => Result (List String) QueryError =
+    jStringFn qSinglePass
+
+# An editor for JString. Can be used to modify a JString in
+# a JValue in place. Prefer using jEditString when possible.
+#
+# Parameters:
+#  - `editFn`: The function that modifies the assumed string
+#  - `input`: The JValue to be modified
+#
+# Examples:
+# ```
+#   def updateInt s = match (int s)
+#      Some x = str (x + 1) | Pass
+#      None   = failWithError "'{s}' is not an integer"
+#   query (JString "10") $ jEditStringFn updateInt = Pass (JString "11")
+#   query (JInteger 10) $ jEditStringFn updateInt = Fail (Error ".: not a string" Nil)
+#
+#   # Update your age stored as a string
+#   query person
+#   $ jEditField "name"
+#   $ jEditStringFn
+#   $ updateInt
+#
+#   # Reports "./name: 'Alice' is not an integer"
+#   query person
+#   $ jEditField "name"
+#   $ jEditStringFn
+#   $ updateInt
+# ```
+export def jEditStringFn (editFn: String => Result String QueryError) (input: JValue): Result JValue QueryError =
+    match input
+        JString s ->
+            require Pass es = editFn s
+
+            Pass (JString es)
+        _ -> Fail "not a string {renderActualJValue input}".makeQueryError
+
+# An editor for JString. Can be used to modify a JString in
+# a JValue in place.
+#
+# Parameters:
+#  - `editFn`: The function that modifies the assumed string
+#  - `input`: The JValue to be modified
+#
+# Examples:
+# ```
+#   query (JString "foo") $ jEditString ("{_}bar") = Pass (JString "foobar")
+#   query (JInteger 10) $ jEditString ("{_}bar") = Fail (Error ".: not a string" Nil)
+#
+#   # Lowercase the .name field
+#   query person
+#   $ jEditField "name"
+#   $ jEditString
+#   $ unicodeLowercase
+#
+#   # Returns an error. Reports "not a string"
+#   query person
+#   $ jEditField "age"
+#   $ jEditString
+#   $ unicodeLowercase
+# ```
+export def jEditString (editFn: String => String): (input: JValue) => Result JValue QueryError =
+    jEditStringFn
+    $ qPass editFn
+
+# A getter for integers. Can be used to access integers in json.
+# Doubles that are exact integers as well as true integers are
+# both allowed but anything else will return an error.
+# If possible for your case consider using jInteger instead.
+#
+# Parameters:
+#  - `getFn`: The function that consumes the integer if present
+#  - `input`: The JValue to get the integer of
+#
+# Examples:
+# ```
+#   def checkAge = match _
+#       x if x > 130 = failWithError "No one is {str x} years old!"
+#       x if x < 0   = failWithError "{str x} is not a valid age"
+#       x            = Pass x
+#   query (JInteger 28) $ jIntegerFn checkAge = Pass 10
+#   query (JInteger (-3)) $ jIntegerFn checkAge = Fail (Error ".: -3 is not a valid age" Nil)
+#   query person $ jField "age" $ jIntegerFn $ checkAge = Pass 28
+#   query person $ jField "name" $ jIntegerFn $ checkAge = Fail (Error "./name: not an integer" Nil)
+# ```
+export def jIntegerFn (getFn: Integer => Result a QueryError) (input: JValue): Result a QueryError =
+    match input
+        JInteger i -> getFn i
+        JDouble d ->
+            def Pair whole frac = dmodf d
+
+            if frac ==. 0.0 then
+                getFn whole
+            else
+                Fail "not an integer {renderActualJValue input}".makeQueryError
+        _ -> Fail "not an integer {renderActualJValue input}".makeQueryError
+
+# A terminal getter for integers. Can be used to access integers
+# in json. Doubles that are exact integers as well as true integers
+# are both allowed but anything else will return an error. You
+# can use this to terminate a chain of $ operations.
+#
+# Parameters:
+#  - `input`: The JValue to get the integer of
+#
+# Examples:
+# ```
+#   query (JInteger 10) $ jInteger = Pass (10, Nil)
+#   query (JString "foo") $ jInteger = Fail ... # Reports "not an integer"
+#   queryOne person $ jField "age" $ jInteger = Pass 28
+#   queryOne person $ jField "name" $ jInteger = Fail (Error ".name: not an integer" Nil)
+# ```
+export def jInteger: (input: JValue) => Result (List Integer) QueryError =
+    jIntegerFn qSinglePass
+
+# An editor for integers in json. Can be used to modify an
+# integer in a JValue in place. Prefer using jEditInteger
+# when possible.
+#
+# Parameters:
+#  - `editFn`: The function that modifies the assumed integer
+#  - `input`: The JValue to have its integer modified
+#
+# Examples:
+# ```
+#   def birthday = match _
+#       x if x > 130 = failWithError "No one is {str x} years old!"
+#       x if x < 0   = failWithError "{str x} is not a valid age"
+#       x            = Pass (x + 1)
+#   query (JInteger 10) $ jEditIntegerFn $ birthday = Pass (JInteger 11)
+#   query (JString "foo") $ jEditIntegerFn $ birthday = Fail (Error ".: not an integer" Nil)
+#   query person $ jEditField "age" $ jEditIntegerFn $ birthday
+#   query person $ jEditField "name" $ jEditIntegerFn $ birthday = Fail (Error "./name: not an integer" Nil)
+# ```
+export def jEditIntegerFn (editFn: Integer => Result Integer QueryError) (input: JValue): Result JValue QueryError =
+    match input
+        JInteger i ->
+            require Pass ei = editFn i
+
+            Pass (JInteger ei)
+        JDouble d ->
+            def Pair whole frac = dmodf d
+
+            if frac ==. 0.0 then
+                require Pass ei = editFn whole
+
+                Pass (JInteger ei)
+            else
+                Fail "not an integer {renderActualJValue input}".makeQueryError
+        _ -> Fail "not an integer {renderActualJValue input}".makeQueryError
+
+# An editor for integers in json. Can be used to modify an
+# integer in a JValue in place.
+#
+# Parameters:
+#  - `editFn`: The function that modifies the assumed integer
+#  - `input`: The JValue to have its integer modified
+#
+# Examples:
+# ```
+#   query (JInteger 10) $ jEditInteger (_+1) = Pass (JString 11)
+#   query (JString "foo") $ jEditInteger (_+1) = Fail (Error ".: not an integer" Nil)
+#   query person $ jEditField "age" $ jEditInteger (_+1) # Birthday
+#   query person $ jEditField "name" $ jEditInteger (_+1) = Fail (Error ".name: not an integer" Nil)
+# ```
+export def jEditInteger (editFn: Integer => Integer): (input: JValue) => Result JValue QueryError =
+    jEditIntegerFn
+    $ qPass editFn
+
+# A getter for JBoolean. Can be used to access booleans in json.
+# If possible for your case consider using jBoolean instead.
+#
+# Parameters:
+#  - `getFn`: The function that consumes the boolean if present
+#  - `input`: The JValue to get the boolean of
+#
+# Examples:
+# ```
+#   def onlyTrue = match _
+#       True  = Pass True
+#       False = failWithError "only true is valid"
+#   query (JBoolean True) $ jBooleanFn onlyTrue = Pass True
+#   query (JInteger 10) $ jBooleanFn onlyTrue = Fail (Error ".: not a boolean" Nil)
+#   query order $ jField "frysWithThat" $ jBooleanFn $ onlyTrue = Pass True
+#   query person $ jField "name" $ jBooleanFn $ onlyTrue = Fail (Error "./name: not a boolean" Nil)
+# ```
+export def jBooleanFn (getFn: Boolean => Result a QueryError) (input: JValue): Result a QueryError =
+    match input
+        JBoolean b -> getFn b
+        _ -> Fail "not a boolean {renderActualJValue input}".makeQueryError
+
+# A terminal getter for JBoolean. Can be used to access booleans
+# in json. You can use this to terminate a chain of $ operations.
+#
+# Parameters:
+#  - `input`: The JValue to get the boolean of
+#
+# Examples:
+# ```
+#   query (JBoolean True) $ jBoolean = Pass (True, Nil)
+#   query (JInteger 10) $ jBoolean = Fail (Error ".: not a boolean" Nil)
+#   queryOne order $ jField "frysWithThat" $ jBoolean = Pass True
+#   queryOne person $ jField "name" $ jBoolean = Fail (Error ".name: not a boolean" Nil)
+# ```
+export def jBoolean: (input: JValue) => Result (List Boolean) QueryError =
+    jBooleanFn qSinglePass
+
+# An editor for JBoolean. Can be used to modify a
+# boolean of a JValue in place. Prefer using jEditBoolean
+# when possible
+#
+# Parameters:
+#  - `editFn`: The function that modifies the boolean if present
+#  - `input`: The JValue to have its boolean modified
+#
+# Examples:
+# ```
+#   def onlyTrue = match _
+#       True  = Pass True
+#       False = failWithError "only true is valid"
+#   query (JBoolean True) $ jEditBooleanFn $ onlyTrue = Pass (JBoolean True)
+#   query (JString "foo") $ jEditBooleanFn $ onlyTrue = Fail (Error ".: not a boolean" Nil)
+#   query order $ jEditField "frysWithThat" $ jEditBooleanFn $ onlyTrue # Frys are a must
+#   query person $ jEditField "name" $ jEditBooleanFn $ onlyTrue # Reports "./name: not a boolean"
+# ```
+export def jEditBooleanFn (editFn: Boolean => Result Boolean QueryError) (input: JValue): Result JValue QueryError =
+    match input
+        JBoolean b ->
+            require Pass eb = editFn b
+
+            Pass (JBoolean eb)
+        _ -> Fail "not a boolean {renderActualJValue input}".makeQueryError
+
+# An editor for JBoolean. Can be used to modify a
+# boolean of a JValue in place.
+#
+# Parameters:
+#  - `editFn`: The function that modifies the boolean if present
+#  - `input`: The JValue to have its boolean modified
+#
+# Examples:
+# ```
+#   query (JBoolean True) $ jEditBoolean (!_) = Pass (JBoolean False)
+#   query (JString "foo") $ jEditBoolean (!_) = Fail (Error ".: not a boolean" Nil)
+#   query order $ jEditField "frysWithThat" $ jEditBoolean (\_ True) # I for sure want frys
+#   query person $ jEditField "name" $ jEditBoolean (!_) # Reports ".name: not a boolean"
+# ```
+export def jEditBoolean (editFn: Boolean => Boolean): (input: JValue) => Result JValue QueryError =
+    jEditBooleanFn
+    $ qPass editFn
+
+# A getter for numbers. Can be used to access numbers in json.
+# If possible for your case consider using jDouble instead.
+#
+# Parameters:
+#  - `getFn`: The function that consumes the number if present
+#  - `input`: The JValue to get the number of
+#
+# Examples:
+# ```
+#   def jProb = match _
+#       x if x >. 1.0 = failWithError "probabilities should be <= to 1"
+#       x if x <. 0.0 = failWithError "probabilities should be >= to 0"
+#       x             = Pass x
+#   query (JDouble 0.9) $ jDoubleFn jProb = Pass (0.9, Nil)
+#   query (JInteger 1) $ jDoubleFn jProb = Pass 1e0
+#   query (JString "foo") $ jDoubleFn jProb = Fail (Error ".: not a number" Nil)
+#   query constants $ jField "piOver4" $ jDoubleFn jProb = Pass 0.78539816339744828
+#   query person $ jField "name" $ jDoubleFn jProb = Fail (Error "./name: not a number" Nil)
+# ```
+export def jDoubleFn (getFn: Double => Result a QueryError) (input: JValue): Result a QueryError =
+    match input
+        JDouble d -> getFn d
+        JInteger i -> getFn (dint i)
+        _ -> Fail "not a number {renderActualJValue input}".makeQueryError
+
+# A terminal getter for numbers. Can be used to access numbers
+# in json. You can use this to terminate a chain of $ operations.
+#
+# Parameters:
+#  - `input`: The JValue to get the number of
+#
+# Examples:
+# ```
+#   query (JDouble 10.0) $ jDouble = Pass (10e0, Nil)
+#   query (JInteger 10) $ jDouble = Pass (10e0, Nil)
+#   query (JBoolean True) $ jDouble = Fail (Error ".: not a number" Nil)
+#   queryOne constants $ jField "pi" $ jDouble = Pass 3.1415926535897931
+#   queryOne person $ jField "name" $ jDouble = Fail (Error ".name: not a number" Nil)
+# ```
+export def jDouble: (input: JValue) => Result (List Double) QueryError =
+    jDoubleFn qSinglePass
+
+# An editor for numbers in json. Can be used to modify a
+# number in a JValue in place. Prefer using jEditDouble
+#
+# Parameters:
+#  - `editFn`: The function that modifies the number if present
+#  - `input`: The JValue to have its number modified
+#
+# Examples:
+# ```
+#   # Error if a double is not a probability
+#   def prob = match _
+#       p if p >. 1.0 = failWithError "probabilities should be <= to 1"
+#       p if p <. 0.0 = failWithError "probabilities should be >= to 0"
+#       _             = Pass Unit
+#   # Update belief after taking a covid test
+#   def bayes specificity sensitivity prior =
+#       require Pass _ = prob specificity
+#       require Pass _ = prob sensitivity
+#       require Pass _ = prob prior
+#       def marginal = sensitivity *. prior +. (1.0 -. specificity) *. (1.0 -. prior)
+#       sensitivity *. prior /. marginal | Pass
+#   query (JDouble 0.2) $ jEditDoubleFn $ bayes 0.98 0.86 = Pass (JDouble 0.91489361702127658)
+#   query (JInteger 1) $ jEditDoubleFn $ bayes 0.98 0.86 = Pass (JDouble 1e0)
+#   query (JDouble 3.14) $ jEditDoubleFn $ bayes 0.98 0.86 = Fail (Error ".: probabilities should be <= to 1" Nil)
+#   query (JString "foo") $ jEditDoubleFn $ bayes 0.98 0.86 = Fail (Error ".: not a number" Nil)
+# ```
+export def jEditDoubleFn (editFn: Double => Result Double QueryError) (input: JValue): Result JValue QueryError =
+    match input
+        JDouble d ->
+            require Pass ed = editFn d
+
+            Pass (JDouble ed)
+        JInteger i ->
+            require Pass ed = editFn (dint i)
+
+            Pass (JDouble ed)
+        _ -> Fail "not a number {renderActualJValue input}".makeQueryError
+
+# An editor for numbers in json. Can be used to modify a
+# number in a JValue in place. Prefer using jEditDouble
+#
+# Parameters:
+#  - `editFn`: The function that modifies the number if present
+#  - `input`: The JValue to have its number modified
+#
+# Examples:
+# ```
+#   query (JDouble 10.0) $ jEditDouble (_+.1.0) = Pass (JDouble 11e0)
+#   query (JInteger 10) $ jEditDouble (_+.1.0) = Pass (JDouble 11e0)
+#   query (JString "foo") $ jEditDouble (_+.1.0) = Fail (Error ".: not a number" Nil)
+#   query person $ jEditField "height" $ jEditDouble (_+.1.5) # Grow a little bit
+#   query person $ jEditField "name" $ jEditDouble (_+.1.5) # Reports "not a number"
+# ```
+export def jEditDouble (editFn: Double => Double): (input: JValue) => Result JValue QueryError =
+    jEditDoubleFn
+    $ qPass editFn
+
+# A getter for JArray. Can be used to access an array in json.
+# Consider using jFlatten instead.
+#
+# Parameters:
+#  - `getFn`: The function that consumes the array if present
+#  - `input`: The JValue to get the array of
+#
+# Examples:
+# ```
+#   def getSingleton = match _
+#       x, Nil = Pass x
+#       _, _   = failWithError "too many elements"
+#       _      = failWithError "too few elements"
+#
+#   query (JArray (x, Nil)) $ jArrayFn $ getSingleton = Pass x
+#   query (JInteger 10) $ jArrayFn $ getSingleton = Fail (Error ".: not an array" Nil)
+# ```
+export def jArrayFn (getFn: List JValue => Result a QueryError) (input: JValue): Result a QueryError =
+    match input
+        JArray arr -> getFn arr
+        _ -> Fail "not an array {renderActualJValue input}".makeQueryError
+
+# An editor for JArray. Can be used to modify an array
+# inside a JValue in place. Consider using jEditFlatten
+# or jEditPrepend instead.
+#
+# Parameters:
+#  - `editFn`: The function that modifies the array if present
+#  - `input`: The JValue to have its array modified
+#
+# Examples:
+# ```
+#   def removeFirst = match _
+#       Nil   = failWithError "cannot remove first element of empty list"
+#       x, xs = Pass xs
+#
+#   query names $ jEditArray $ removeFirst # Remove the first name from a list of names
+#   query (JString "foo") $ jEditArray $ removeFirst = Fail (Error ".: not an array" Nil)
+# ```
+export def jEditArray (editFn: List JValue => Result (List JValue) QueryError) (input: JValue): Result JValue QueryError =
+    match input
+        JArray arr ->
+            require Pass earr = editFn arr
+
+            Pass (JArray earr)
+        _ -> Fail "not an array {renderActualJValue input}".makeQueryError
+
+# A getter that pulls out all the values of a list. You
+# can think of this like `[]` in jq.
+#
+# Parameters:
+#  - `getFn`: The function that consumes each element of an array
+#  - `input`: The JValue containing an array to apply `getFn` to
+#
+# Examples:
+# ```
+#   query names $ jFlatten jString = Pass ("Alice", "Bob", "Carol", Nil)
+#   query (JInteger 10) $ jFlatten jString = Fail (Error ".: not an array" Nil)
+#   queryOne person $ jField "friends" $ jFlatten $ jField "name" $ jString = Pass ("Alice", "Bob", "Carol", Nil)
+#   queryOne person $ jField "name" $ jFlatten $ jString = Fail (Error "./name: not an array" Nil)
+# ```
+export def jFlatten (getFn: JValue => Result (List a) QueryError) (input: JValue): Result (List a) QueryError =
+    match input
+        JArray list -> qFlatten getFn list
+        _ -> Fail "not an array {renderActualJValue input}".makeQueryError
+
+# An editor for JValue that edits each element of a
+# JArray.
+#
+# Parameters:
+#  - `editFn`: The function that modifies each element of an array
+#  - `input`: The JValue to have its array modified
+#
+# Examples:
+# ```
+#   jEditFlatten (JArray fields) $ jEditInteger (_+1) # Add 1 to every integer in an array
+#   jEditFlatten (JString "foo") $ jEditInteger (_+1) = Fail ... # Reports "not an array"
+# ```
+export def jEditFlatten (editFn: JValue => Result JValue QueryError) (input: JValue): Result JValue QueryError =
+    match input
+        JArray list ->
+            require Pass newList = qEditFlatten editFn list
+
+            Pass (JArray newList)
+        _ -> Fail "not an array {renderActualJValue input}".makeQueryError
+
+# A terminal editor for JValue that adds an element to the
+# front of a JArray. You can use this at the end of a '$'
+# chain
+#
+# Parameters:
+#  - `input`: The JArray to add an element to
+#
+# Examples:
+# ```
+#   query (JArray names) $ jEditPrepend (JString "Bob") = Pass (JArray (JString "Bob", names))
+#   query (JString "foo") $ jEditPrepend (JString "Alice") = Fail (Error ".: not an array" Nil)
+# ```
+export def jEditPrepend (toAdd: JValue) (input: JValue): Result JValue QueryError = match input
+    JArray arr ->
+        JArray (toAdd, arr)
+        | Pass
+    _ -> Fail "not an array {renderActualJValue input}".makeQueryError
+
+# A getter that pulls out one specific value of
+# a JArray from a specific index.
+#
+# Parameters:
+#  - `index`: The index of the specific element you want to access
+#  - `getFn`: The function that consumes the specific element
+#  - `input`: The JValue containing an array to fetch a value from
+#
+# Examples:
+# ```
+#   queryOne employees $ jAt 0 $ jField "name" $ jString = Pass "Alice"
+#   queryOne employees $ jAt 1000000 $ jField "name" $ jString = Fail (Error ".[1000000]: out of bounds" Nil)
+#   queryOne person $ jAt 0 $ jField "name" $ jString = Fail (Error ".not an array" Nil)
+# ```
+export def jAt (index: Integer) (getFn: JValue => Result a QueryError) (input: JValue): Result a QueryError =
+    match input
+        JArray arr -> qAt index getFn arr
+        _ -> Fail "not an array {renderActualJValue input}".makeQueryError
+
+# An editor that edits one specific value of
+# a JArray at a specific index.
+#
+# Parameters:
+#  - `index`: The index of the specific element you want to access
+#  - `editFn`: The function that edits the specific element
+#  - `input`: The JValue containing an array to edit a single value in
+#
+# Examples:
+# ```
+#   query names $ jEditAt 1 $ jEditString ("_ {lastName}") # Add lastName to name mat index 1
+#   query (JArray (x, y, z, Nil)) $ jEditAt 7 $ fn = Fail (Error ".[7]: out of bounds" Nil)
+#   query (JString "foo") $ jEditAt 3 $ fn = Fail (Error ".: not an array" Nil)
+# ```
+export def jEditAt (index: Integer) (editFn: JValue => Result JValue QueryError) (input: JValue): Result JValue QueryError =
+    match input
+        JArray arr ->
+            require Pass earr = qEditAt index editFn arr
+
+            Pass (JArray earr)
+        _ -> Fail "not an array {renderActualJValue input}".makeQueryError
+
+# A getter that allows the query to succeed even if the current value is a JSON `null`.
+#
+# You very likely don't want to use this with `queryOne`.
+#
+# Parameters:
+#  - `getFn`: The function that consumes the value
+#  - `input`: The JValue containing the value to attempt to fetch from
+#
+# Examples:
+# ```
+#   queryOptional person $ jField "name" $ jNullable jString = Some "Jane Marple"
+#   queryOptional person $ jField "spouse" $ jNullable jString = None # Won't fail even though not everyone is married
+# ```
+export def jNullable (getFn: JValue => Result (List a) QueryError): (input: JValue) => Result (List a) QueryError =
+    match _
+        JNull -> Pass Nil
+        input -> getFn input
+
+# An editor that allows the query to succeed even if the current value is a JSON `null`.
+#
+# Parameters:
+#  - `editFn`: The function that edits the value
+#  - `input`: The JValue to edit a single value in
+#
+# Examples:
+# ```
+#   def makeSortable name = match (extract `(.*) (.*)` name)
+#       first, last, Nil = Pass "{last}, {first}"
+#       singleName = Pass singleName
+#   query person $ jEditField "name" $ jEditNullable (jEditStringFn makeSortable) # Results in something like "Marple, Jane"
+#   query person $ jEditField "spouse" $ jEditNullable (jEditStringFn makeSortable) # Won't fail even though not everyone is married
+# ```
+export def jEditNullable (editFn: JValue => Result JValue QueryError): (input: JValue) => Result JValue QueryError =
+    match _
+        JNull -> Pass JNull
+        input -> editFn input
+
+# A getter that pulls out one specific field of
+# a JObject. An error will be produced if the field
+# does not exist or if there are multiple copies of
+# that field.
+#
+# Parameters:
+#  - `field`: The name of the field to access
+#  - `getFn`: The function that consumes the value of the field
+#  - `input`: The JValue containing an object to access the field of
+#
+# Examples:
+# ```
+#   query (JObject ("foo" :-> x, Nil)) $ jField "foo" Pass = Pass x
+#   query (JObject ("baz" :-> x, Nil)) $ jField "bar" Pass = Fail (Error ".bar: key not found" Nil)
+#   query (JObject ("foo" :-> x, "foo" :-> y, Nil)) $ jField "foo" Pass = Fail ... # Reports "too many "foo" instances
+#   queryOne person $ jField "name" $ jString = Pass "Alice" # Typical use
+# ```
+export def jField (field: String) (getFn: JValue => Result a QueryError) (input: JValue): Result a QueryError =
+    def helper = match _
+        JObject pairs -> match (lookup (_ ==* field) pairs)
+            Nil -> Fail "key {format field} not found".makeQueryError
+            x, Nil -> qPathAnnotation (PathSlash field) getFn x
+            _ -> Fail "key {format field} found multiple times, expected only once".makeQueryError
+        _ -> Fail "not an object {renderActualJValue input}".makeQueryError
+
+    helper input
+
+# A getter that pulls out all fields of a JObject.
+# An error will be produced if no field matches
+# the given predicate.
+#
+# Parameters:
+#  - `predicate`: The function that is used to compare against the field
+#  - `getFn`: The function that consumes the value of the field
+#  - `input`: The JValue containing an object to access the field of
+#
+# Examples:
+# ```
+#   def comparator a b = a ==* b
+#   queryOne (JObject ("foo" :-> x, Nil)) $ jFieldPred "foo".comparator Pass = Pass x
+# ```
+export def jFieldPred (predicate: String => Boolean) (getFn: JValue => Result (List a) QueryError) (input: JValue): Result (List a) QueryError =
+    doJFieldPred predicate "predicate" getFn input
+
+def doJFieldPred (predicate: String => Boolean) (name: String) (getFn: JValue => Result (List a) QueryError) (input: JValue): Result (List a) QueryError =
+    match input
+        JObject pairs ->
+            def selected = filter (predicate _.getPairFirst) pairs
+
+            match selected
+                Nil -> Fail "no keys matching {name} found".makeQueryError
+                _ ->
+                    def getPairSecondFindFail (Pair field y) =
+                        require Pass ey = qPathAnnotation (PathSlash field) getFn y
+
+                        Pass ey
+
+                    map getPairSecondFindFail selected
+                    | findFail
+                    | rmap flatten
+        _ -> Fail "not an object {renderActualJValue input}".makeQueryError
+
+# A getter that pulls out one specific field of
+# a JObject. An error is returned if there are multiple
+# copies of that field. If the field is not present
+# the supplied default value is used instead, wrapped as a
+# single-element list.
+#
+# Parameters:
+#  - `field`: The name of the field to access
+#  - `default`: The default value to use if the field is missing
+#  - `getFn`: The function that consumes the value of the field
+#  - `input`: The JValue containing an object to access the field of
+#
+# Examples:
+# ```
+#   queryOne (JObject ("foo" :-> JInteger 10, Nil)) $ jFieldDefault "foo" 10 $ jInteger = Pass 10
+#   queryOne (JObject Nil) $ jFieldDefault "foo" 10 $ jInteger = Pass 10
+#   queryOne (JObject ("foo" :-> JNull, "foo" :-> JNull, Nil)) $ jFieldDefault "foo" 10 $ jInteger = Fail ... # Reports "too many "foo" instances
+#   queryOne order $ jFieldDefault "frysWithThat" False $ jBoolean = Pass False # Typical use
+# ```
+export def jFieldDefault (field: String) (default: a) (getFn: JValue => Result (List a) QueryError) (input: JValue): Result (List a) QueryError =
+    jFieldDefaultMany field (default, Nil) getFn input
+
+# A getter that pulls out one specific field of
+# a JObject. An error is returned if there are multiple
+# copies of that field. If the field is not present
+# the supplied default value is used instead, allowing
+# for queries which might return multiple values.
+#
+# Parameters:
+#  - `field`: The name of the field to access
+#  - `default`: The default value to use if the field is missing
+#  - `getFn`: The function that consumes the value of the field
+#  - `input`: The JValue containing an object to access the field of
+#
+# Examples:
+# ```
+#   queryOne (JObject ("foo" :-> JArray (JInteger 10, Nil), Nil)) $ jFieldDefaultMany "foo" (10, Nil) $ jInteger = Pass (10, Nil)
+#   queryOne (JObject Nil) $ jFieldDefault "foo" (10, Nil) $ jInteger = Pass (10, Nil)
+#   queryOne (JObject ("foo" :-> JNull, "foo" :-> JNull, Nil)) $ jFieldDefault "foo" (10, Nil) $ jInteger = Fail ... # Reports "too many "foo" instances
+# ```
+export def jFieldDefaultMany (field: String) (default: a) (getFn: JValue => Result a QueryError) (input: JValue): Result a QueryError =
+    match input
+        JObject pairs -> match (lookup (_ ==* field) pairs)
+            Nil -> Pass default
+            x, Nil -> qPathAnnotation (PathSlash field) getFn x
+            _ -> Fail "key {format field} found multiple times, expected only once".makeQueryError
+        _ -> Fail "not an object {renderActualJValue input}".makeQueryError
+
+# A getter that pulls out one specific field of
+# a JObject if present. An error will be produced
+# if there are multiple copies of that field.
+# Prefer using `jField` for non-optional fields.
+#
+# Parameters:
+#  - `field`: The name of the field to access
+#  - `getFn`: The function that consumes the value of the field
+#  - `input`: The JValue containing an object to access the field of
+#
+# Examples:
+# ```
+#   query person $ jFieldOpt "name" $ jString = Pass ("Alice", Nil)
+#   query flow $ jFieldOpt "Name" $ jString = Pass Nil # 'Name' is optional
+# ```
+export def jFieldOpt (field: String) (getFn: JValue => Result (List a) QueryError) (input: JValue): Result (List a) QueryError =
+    jFieldDefaultMany field Nil getFn input
+
+# An editor that edits all fields of a JObject that
+# match a field name. If the field is missing an
+# error will be returned.
+#
+# Parameters:
+#  - `field`: The name of the fields to edit
+#  - `editFn`: The function that edits the value of the field
+#  - `input`: The JValue to have its fields edited
+#
+# Examples:
+# ```
+#   query person $ jEditField "name" $ jEditString ("{_} {lastName}") # Add a last name to a person's name
+#   query person $ jEditField "age" $ jEditInteger (_+1) # Have a birthday
+#   query order $ jEditField "frysWithThat" $ jEditBoolean (\_ True) # Make sure we order frys
+#   query person $ jEditField "frysWithThat" $ jEditBoolean (\_ True) # Reports ".frysWithThat: key not found"
+# ```
+export def jEditField (field: String) (editFn: JValue => Result JValue QueryError) (input: JValue): Result JValue QueryError =
+    require JObject obj = input
+    else Fail "not an object {renderActualJValue input}".makeQueryError
+
+    # Loop over each entry to see if a match has been found
+    def loop (matchFound: Boolean) = match _
+        # If we find a match, edit it, and set matchFound to True
+        (Pair key value, rest) ->
+            # Check if the key is set
+            require True = field ==* key
+            else
+                require Pass restResult = loop matchFound rest
+
+                Pass (Pair key value, restResult)
+
+            # Now make matchFound=True for rest
+            def restResult = loop True rest
+
+            # Edit the value
+            require Pass result = qPathAnnotation (PathSlash field) editFn value
+            require Pass editedRest = restResult
+
+            Pass (Pair key result, editedRest)
+        Nil ->
+            if matchFound then
+                Pass Nil
+            else
+                Fail "key {format field} not found".makeQueryError
+
+    require Pass eobj = loop False obj
+
+    JObject eobj
+    | Pass
+
+# An editor that edits the field of a JObject that
+# matches a field name. If the field is missing it is
+# added to the JObject. If the field is duplicated in
+# the JObject then a failure will be reported.
+#
+# Parameters:
+#  - `field`: The name of the fields to edit or set
+#  - `value`: The value that is assigned to the matching field
+#  - `input`: The JValue to have its fields edited
+#
+# Examples:
+# ```
+#   query person $ jEditSetField "name" $ JString "John Doe" # Set a person's name
+#   query person $ jEditSetField "newField" $ JInteger 10 # Add newField to a person
+#   query duplicateName $ jEditSetField "name" $ JString "New Name"  # Reports "./name: duplicate key in JObject"
+# ```
+export def jEditSetField (field: String) (value: JValue) (input: JValue): Result JValue QueryError =
+    require JObject obj = input
+    else Fail "not an object {renderActualJValue input}".makeQueryError
+
+    # Loop over each entry to see if a match has been found
+    def loop (matchFound: Boolean) = match _
+        # If we find a match, edit it, and set matchFound to True
+        (Pair key v, rest) ->
+            # Check if the key is set
+            require True = field ==* key
+            else
+                require Pass restResult = loop matchFound rest
+
+                Pass (Pair key v, restResult)
+
+            # We should only find one matching key. If this is True then
+            # there is a duplicate key in the JObject.
+            require False = matchFound
+            else Fail "key {format field} found multiple times, expected only once".makeQueryError
+
+            # Now make matchFound=True for rest
+            def restResult = loop True rest
+
+            require Pass editedRest = restResult
+
+            Pass (Pair key value, editedRest)
+        Nil ->
+            if matchFound then
+                Pass Nil
+            else
+                # If we have fully explored this list and we haven't
+                # found a match, then insert it.
+                Pass (Pair field value, Nil)
+
+    require Pass eobj = loop False obj
+
+    JObject eobj
+    | Pass
+
+# Checks if two JValues are equal. Prefer using `==/`
+# unless you're in a setting where a Result List is
+# needed. The intended use case is in '$' as a
+# terminal getter that returns true/false based on
+# if a particular value is equal to the supplied
+# value.
+#
+# Parameters:
+#   - `value`: The value to check the input against
+#   - `input`: The input to the getter that will be checked against `value`
+#
+# Examples:
+# ```
+#   jEq (JString "foo") (JString "foo") = Pass (True, Nil)
+#   jEq (JInteger 10) (JString "foo") = Pass (False, Nil)
+#   query objects $ qIf (queryOne _ $ jField "type" $ jEq "foo".JString) # get all JValues with .type == "foo"
+# ```
+export def jEq (value: JValue): (input: JValue) => Result (List Boolean) QueryError =
+    _ ==/ value
+    | single
+    | Pass
+
+# A terminal getter to check if a JValue is equal to a
+# an integer. The intended use case is in a '$' chain
+# rather than for strict equality checking. This is
+# still good to use if you really want to make sure that
+# the type you're checking against is an integer, but
+# otherwise prefer `==/`. This will return an error
+# if the JValue being checked against is not an integer.
+#
+# Parameters:
+#   - `value`: The integer to check the input against
+#   - `input`: The input to the getter that will be checked against `value`
+#
+# Examples:
+# ```
+#   queryOne (JInteger 10) $ jEqInt 10 = Pass True
+#   queryOne (JDouble 10.0) $ jEqInt 10 = Pass True
+#   queryOne (JInteger 10) $ jEqInt 11 = Pass False
+#   queryOne (JDouble 10.1) $ jEqInt 10 = Fail (Error ".not an integer" Nil)
+#   queryOne (JString "foo") $ jEqInt 10 = Fail (Error ".not an integer" Nil)
+#   query objects $ qIf (queryOne _ $ jField "type" $ jEqInt 1) # get all JValues with .type == 1
+# ```
+export def jEqInt (value: Integer) (input: JValue): Result (List Boolean) QueryError = match input
+    JInteger i ->
+        i == value
+        | single
+        | Pass
+    JDouble d ->
+        def Pair whole frac = dmodf d
+
+        if frac ==. 0.0 then
+            Pass (single (whole == value))
+        else
+            Fail "not an integer {renderActualJValue input}".makeQueryError
+    _ -> Fail "not an integer {renderActualJValue input}".makeQueryError
+
+# A terminal getter to check if a JValue is equal to a
+# a string. The intended use case is in a '$' chain
+# rather than for strict equality checking. This is
+# still good to use if you really want to make sure that
+# the type you're checking against is a string but
+# otherwise prefer `==/`. This will return an error
+# if the JValue being checked against is not a JString.
+#
+# Parameters:
+#   - `value`: The string to check the input against
+#   - `input`: The input to the getter that will be checked against `value`
+#
+# Examples:
+# ```
+#   queryOne (JString "foo") $ jEqStr "foo" = Pass True
+#   queryOne (JString "bar") $ jEqStr "foo" = Pass False
+#   queryOne (JInteger 10) $ jEqStr "foo" = Fail (Error ".not a string" Nil)
+#   query objects $ qIf (queryOne _ $ jField "type" $ jEqStr "foo") # get all JValues with .type == "foo"
+# ```
+export def jEqStr (value: String) (input: JValue): Result (List Boolean) QueryError = match input
+    JString s ->
+        s ==* value
+        | single
+        | Pass
+    _ -> Fail "not a string {renderActualJValue input}".makeQueryError
+
+# A terminal getter to check if a JValue is NOT equal to a
+# a string. The intended use case is in a '$' chain rather than
+# for strict equality checking. This will return an error if the
+# JValue being checked against is not a JString.
+#
+# Parameters:
+#   - `value`: The string to check the input against
+#   - `input`: The input to the getter that will be checked against `value`
+#
+# Examples:
+# ```
+#   queryOne (JString "foo") $ jNotEqStr "foo" = Pass False
+#   queryOne (JString "bar") $ jNotEqStr "foo" = Pass True
+#   queryOne (JInteger 10) $ jNotEqStr "foo" = Fail (Error ".not a string" Nil)
+#   query objects $ qIf (queryOne _ $ jField "type" $ jNotEqStr "foo") # get all JValues with .type != "foo"
+# ```
+export def jNotEqStr (value: String) (input: JValue): Result (List Boolean) QueryError = match input
+    JString s ->
+        s !=* value
+        | single
+        | Pass
+    _ -> Fail "not a string {renderActualJValue input}".makeQueryError
+
+# A terminal getter for JObject that pulls key value pairs
+#
+# Parameters:
+#  - `getFn`: A terminal getter function for getting a json value
+#  - `input`: The JValue containing an object that you want the key value pairs of.
+#
+# Examples:
+# ```
+# query (JObject ("foo" :-> JInteger 10, "bar" :-> JInteger 11,)) $ jPairs $ jInteger = Pass (Pair "foo" 10, Pair "bar" 11,)
+# ```
+export def jPairs (getFn: JValue => Result (List a) QueryError) (input: JValue): Result (List (Pair String a)) QueryError =
+    match input
+        JObject obj ->
+            def getPair (Pair (k: String) (v: JValue)) =
+                require Pass value = qPathAnnotation (PathSlash k) getFn v
+
+                map (Pair k) value
+                | Pass
+
+            map getPair obj
+            | findFail
+            | rmap flatten
+        _ -> Fail "not an object {renderActualJValue input}".makeQueryError
+
+# A terminal getter for JObject that pulls out all the keys into a list
+#
+# Parameters:
+#  - `input`: The JValue containing an object that you want the keys of.
+#
+# Examples:
+# ```
+# query (JObject ("foo" :-> JInteger 10, "bar" :-> JInteger 11,)) $ jKeys = Pass ("foo", "bar",)
+# ```
+export def jKeys (input: JValue): Result (List String) QueryError = match input
+    JObject obj -> Pass (map getPairFirst obj)
+    _ -> Fail "not an object {renderActualJValue input}".makeQueryError
+
+# A getter for JObject that pulls out all the values into a list.
+#
+# Examples:
+# ```
+# query (JObject ("foo" :-> JInteger 10, "bar" :-> JInteger 11,)) $ jValues $ jInteger = Pass (10, 11,)
+# ```
+export def jValues (getFn: JValue => Result (List a) QueryError) (input: JValue): Result (List a) QueryError =
+    match input
+        JObject obj ->
+            def helper = match _
+                Nil -> Pass Nil
+                (Pair k v), rest ->
+                    def newRestResults = helper rest
+
+                    require Pass newValue = qPathAnnotation (PathSlash k) getFn v
+                    require Pass newRest = newRestResults
+
+                    Pass (newValue ++ newRest)
+
+            helper obj
+        _ -> Fail "not an object {renderActualJValue input}".makeQueryError
+
+# JSON checkers
+
+# Converts a non-terminal getter to a non-terminal checker by applying
+# the sub-checker to everything the getter gets.
+#
+# Parameters:
+# - `getterFn`: The getter to convert to a checker
+# - `checker`: The sub-checker to apply to each child accessed by `getterFn`
+#
+# Examples:
+# ```
+# # Check that the "foo" field is a string
+# toChecker (jField "foo") $ checkJString
+#
+# # Check that .foo.bar field is an integer
+# toChecker (jField "foo" $ jField "bar") $ checkJInteger
+# ```
+export def toChecker (getterFn: (a => Result (List b) Error) => c => Result (List d) Error) (checker: a => Result Unit Error) (value: c): Result Unit Error =
+    require Pass _ = getterFn (checker _ | rmap (\Unit Nil)) value
+
+    Pass Unit
+
+# A terminal checker for JBoolean. Checks that a JValue is a JBoolean.
+#
+# Parameters:
+# - `value`: The JValue to check to see if it's a boolean or not
+#
+# Examples:
+# ```
+# query (JBoolean False) $ checkJBoolean = Pass Unit
+# query (JInteger 10) $ checkJString = Fail (Error ".: not a boolean" Nil)
+# ```
+export def checkJBoolean: (value: JValue) => Result Unit Error = match _
+    JBoolean _ -> Pass Unit
+    _ -> failWithError ": not a boolean"
+
+# A terminal checker for JString. Checks that a JValue is a JString.
+#
+# Parameters:
+# - `value`: The JValue to check to see if its a string or not
+#
+# Examples:
+# ```
+# query (JString "foo") $ checkJString = Pass Unit
+# query (JInteger 10) $ checkJString = Fail (Error ".: not a string" Nil)
+# ```
+export def checkJString: (value: JValue) => Result Unit Error = match _
+    JString _ -> Pass Unit
+    _ -> failWithError ": not a string"
+
+# A terminal checker for json integers. Checks that a JValue
+# is an integer.
+#
+# Parameters:
+# - `value`: The JValue to check to see if its an integer or not
+#
+# Examples:
+# ```
+# query (JInteger 10) $ checkJInteger = Pass Unit
+# query (JString "foo") $ checkJInteger = Fail (Error ".: not an integer" Nil)
+# ```
+export def checkJInteger: JValue => Result Unit Error = match _
+    JInteger _ -> Pass Unit
+    JDouble d ->
+        def Pair _ frac = dmodf d
+
+        if frac ==. 0.0 then Pass Unit else failWithError ": not an integer"
+    _ -> failWithError ": not an integer"
+
+# A terminal checker for json numbers. Checks that a JValue
+# is a number.
+#
+# Parameters:
+# - `value`: The JValue to check to see if its an integer or not
+#
+# ```
+# query (JInteger 10) $ checkJDouble = Pass Unit
+# query (JDouble 3.14) $ checkJDouble = Pass Unit
+# query (JString "foo") $ checkJDouble = Fail (Error ".: not a number" Nil)
+# ```
+export def checkJDouble: JValue => Result Unit Error = match _
+    JInteger _ -> Pass Unit
+    JDouble _ -> Pass Unit
+    _ -> failWithError ": not a number"
+
+# A checker for JArray. Checks that a JValue is an array.
+#
+# Parameters:
+# - `checkFn`: A checker that checks each element of an array
+# - `value`: The JValue to check to see if its an array or not
+#
+# ```
+# query (JArray Nil) $ checkJArray checkJString = Pass Unit
+# query (JArray (JString "foo", Nil)) $ checkJArray checkJString = Pass Unit
+# query (JArray (JInteger 10, Nil)) $ checkJArray checkJString = Fail (Error ".[0]: not a string" Nil)
+# query (JString "foo") $ checkJArray checkJString = Fail (Error ".: not an array" Nil)
+# ```
+export def checkJArray (checkFn: JValue => Result Unit Error): JValue => Result Unit Error = match _
+    JArray list ->
+        def helper i = match _
+            Nil -> Pass Unit
+            k, l ->
+                def subr = helper (i + 1) l
+
+                require Pass Unit =
+                    checkFn k
+                    | prefixError "[{str i}]"
+
+                require Pass Unit = subr
+
+                Pass Unit
+
+        helper 0 list
+    _ -> failWithError ": not an array"
+
+# A checker for JArray. Checks that a JValue is a non-empty
+# array. This is very similair to checkJArray with just that
+# small difference.
+#
+# Parameters:
+# - `checkFn`: A checker that checks each element of an array
+# - `value`: The JValue to check to see if its a non-empty array or not
+#
+# ```
+# query (JArray (JString "foo", Nil)) $ checkJArrayNonEmpty checkJString = Pass Unit
+# query (JArray (JInteger 10, Nil)) $ checkJArrayNonEmpty checkJString = Fail (Error ".[0]: not a string" Nil)
+# query (JString "foo") $ checkJArrayNonEmpty checkJString = Fail (Error ".: not an array" Nil)
+# query (JArray Nil) $ checkJArrayNonEmpty checkJString = Fail (Error ".: array must be non-empty" Nil)
+# ```
+export def checkJArrayNonEmpty (checkFn: JValue => Result Unit Error): JValue => Result Unit Error =
+    match _
+        JArray list ->
+            def helper i = match _
+                Nil -> if i == 0 then failWithError ": array must be non-empty" else Pass Unit
+                k, l ->
+                    def subr = helper (i + 1) l
+
+                    require Pass Unit =
+                        checkFn k
+                        | prefixError "[{str i}]"
+
+                    require Pass Unit = subr
+
+                    Pass Unit
+
+            helper 0 list
+        _ -> failWithError ": not an array"
+
+# A checker for JObject that does not apply any restriction on its fields.
+#
+# Parameters:
+# - `checkFn`: A checker that checks each element of an array
+# - `value`: The JValue to check to see if its an array or not
+export def checkJObject: JValue => Result Unit Error = match _
+    JObject _ -> Pass Unit
+    _ -> failWithError ": not an object"
+
+# A checker for JNull. Checks that a JValue is a null.
+#
+# Parameters:
+# - `value`: The JValue to check to see if its a null or not
+#
+# ```
+# query JNull $ checkJNull = Pass Unit
+# query (JArray Nil) $ checkJNull = Fail (Error ".: not a null" Nil)
+# ```
+export def checkJNull: JValue => Result Unit Error = match _
+    JNull -> Pass Unit
+    _ -> failWithError ": not a null"
+
+# A checker combinator which allows either a null value or runs a further checker.
+#
+# Parameters:
+# - `checkFn`: A checker that runs if the value is not null
+# - `value`: The JValue to check to see if it's a null or not
+#
+# ```
+# query JNull $ checkJNullable $ checkJArray checkJString = Pass Unit
+# query (JArray Nil) $ checkJNullable $ checkJArray checkJString = Pass Unit
+# query (JString "foo") $ checkJNullable $ checkJArray checkJString = Fail (Error ".: not an array" Nil)
+# ```
+export def checkJNullable (checkFn: JValue => Result Unit Error): JValue => Result Unit Error =
+    match _
+        JNull -> Pass Unit
+        json -> checkFn json
+
+# A checker for JObject that checks for optional and required feilds.
+# If an object is missing a required fields, an error is returned.
+# If an object has a field that is neither optional nor required, an error is returned.
+# If an object has multiple fields with the same key, an error is returned.
+# Each individual field can have a checker associated with it that then checks that field
+# to see what kind of JValue it is.
+#
+# Parameters:
+# - `reqFields`: The list of required fields and their associated checkers
+# - `optFields`: The list of optional fields and their associated checkers
+#
+# Examples:
+# ```
+# def mySchema =
+#    checkJFields (
+#      "foo" :-> checkJString,
+#      "bar" :-> checkJInteger,
+#      "baz" :-> checkJDouble,
+#      Nil
+#    ) (
+#      "foobar" :-> checkJArray checkJString,
+#      "barbaz" :-> checkJFields (
+#        "x" :-> checkJDouble,
+#        "y" :-> checkJDouble,
+#        "z" :-> checkJDouble,
+#        Nil
+#      ) Nil,
+#      Nil
+#    )
+# ```
+export def checkJFields (reqFields: List (Pair String (JValue => Result Unit Error))) (optFields: List (Pair String (JValue => Result Unit Error))): JValue => Result Unit Error =
+    match _
+        JObject pairs ->
+            # First check that we have the desired fields
+            def requiredFields = map getPairFirst reqFields
+            def optionalFields = map getPairFirst optFields
+            def required = listToTree scmpIdentifier requiredFields
+            def optional = listToTree scmpIdentifier optionalFields
+            def allFields = tunion required optional
+            def actualFields = listToTree scmpIdentifier (map getPairFirst pairs)
+
+            def missingFields =
+                tsubtract required actualFields # Is tsubtract actully fast?
+
+            def duplicateFields =
+                map (_.getPairFirst :-> 1) pairs
+                | foldr
+                (\pair minsertWith (\_k \new \old new + old) pair.getPairFirst pair.getPairSecond)
+                (mnew scmpIdentifier)
+                | mfilter (\_k \v v > 1)
+
+            require True = tempty missingFields
+            else failWithError "missing required fields: {treeToList missingFields | catWith ", "}"
+
+            def addedFields = tsubtract actualFields allFields
+
+            require True = tempty addedFields
+            else failWithError "fields not recognized: {treeToList addedFields | catWith ", "}"
+
+            require True = mempty duplicateFields
+            else
+                mapToList duplicateFields
+                | map (\p "{p.getPairFirst} (x{str p.getPairSecond})")
+                | catWith ", "
+                | (failWithError "duplicated fields found: {_}")
+
+            # Now check that we satisfy subsequent field conditions
+            def allLinters = reqFields ++ optFields
+
+            def checkField (Pair field value) = match (lookup (field ==* _) allLinters)
+                linter, _ ->
+                    linter value
+                    | prefixError "/{field}"
+                Nil -> unreachable "We already checked that all fields exist"
+
+            map checkField pairs
+            | findFail
+            | rmap (\_ Unit)
+        _ -> failWithError "not an object"
