@@ -1,7 +1,7 @@
 package json
 
 from wake import _
-from utils import prefixError
+from result import prefixError
 from query import _
 
 # Anyone who depends on json will also
