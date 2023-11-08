@@ -15,8 +15,10 @@ from query export def QueryError makeQueryError
 
 def lookup (selectFn: a => Boolean): (list: List (Pair a b)) => List b =
     def select (Pair key value) =
-        if selectFn key then            Some value
-        else None
+        if selectFn key then
+            Some value
+        else
+            None
 
     mapPartial select
 
