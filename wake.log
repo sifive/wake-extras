@@ -1,0 +1,20 @@
+{"hostname":"ashleycoleman-1518","message":"Initialized logging","time":"2023-11-09T10:37:12.339801280","pid":"389161","level":"info"}
+{"hostname":"ashleycoleman-1518","message":"Find all wakefiles took 0.000528 seconds","time":"2023-11-09T10:37:12.389306698","pid":"389161","level":"info"}
+{"hostname":"ashleycoleman-1518","message":"Find all sources took 0.002525 seconds","time":"2023-11-09T10:37:12.391908368","pid":"389161","level":"info"}
+{"hostname":"ashleycoleman-1518","message":"Scanning wake files took 0.029959 seconds","time":"2023-11-09T10:37:12.421971859","pid":"389161","level":"info"}
+{"hostname":"ashleycoleman-1518","message":"Initialized logging","time":"2023-11-09T10:37:36.977037223","pid":"389263","level":"info"}
+{"hostname":"ashleycoleman-1518","message":"Find all wakefiles took 0.000593 seconds","time":"2023-11-09T10:37:36.999100761","pid":"389263","level":"info"}
+{"hostname":"ashleycoleman-1518","message":"Find all sources took 0.003623 seconds","time":"2023-11-09T10:37:37.282091500","pid":"389263","level":"info"}
+{"hostname":"ashleycoleman-1518","message":"Scanning wake files took 0.027365 seconds","time":"2023-11-09T10:37:37.303157560","pid":"389263","level":"info"}
+{"hostname":"ashleycoleman-1518","message":"Initialized logging","time":"2023-11-09T10:39:04.276920097","pid":"389582","level":"info"}
+{"hostname":"ashleycoleman-1518","message":"Find all wakefiles took 0.000650 seconds","time":"2023-11-09T10:39:04.299846086","pid":"389582","level":"info"}
+{"hostname":"ashleycoleman-1518","message":"Find all sources took 0.003143 seconds","time":"2023-11-09T10:39:04.303086980","pid":"389582","level":"info"}
+{"hostname":"ashleycoleman-1518","message":"Scanning wake files took 0.032814 seconds","time":"2023-11-09T10:39:04.336037307","pid":"389582","level":"info"}
+{"hostname":"ashleycoleman-1518","message":"Initialized logging","time":"2023-11-09T10:47:05.608531993","pid":"389902","level":"info"}
+{"hostname":"ashleycoleman-1518","message":"Find all wakefiles took 0.000775 seconds","time":"2023-11-09T10:47:05.640209215","pid":"389902","level":"info"}
+{"hostname":"ashleycoleman-1518","message":"Find all sources took 0.003301 seconds","time":"2023-11-09T10:47:05.643622026","pid":"389902","level":"info"}
+{"hostname":"ashleycoleman-1518","message":"Scanning wake files took 0.029303 seconds","time":"2023-11-09T10:47:05.673054989","pid":"389902","level":"info"}
+{"hostname":"ashleycoleman-1518","message":"Initialized logging","time":"2023-11-09T10:47:12.712026536","pid":"389920","level":"info"}
+{"hostname":"ashleycoleman-1518","message":"Find all wakefiles took 0.000415 seconds","time":"2023-11-09T10:47:12.732957352","pid":"389920","level":"info"}
+{"hostname":"ashleycoleman-1518","message":"Find all sources took 0.003030 seconds","time":"2023-11-09T10:47:12.736060083","pid":"389920","level":"info"}
+{"hostname":"ashleycoleman-1518","message":"Scanning wake files took 0.024125 seconds","time":"2023-11-09T10:47:12.760288650","pid":"389920","level":"info"}

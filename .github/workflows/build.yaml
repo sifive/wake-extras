@@ -25,6 +25,9 @@ jobs:
         - name: Initialize wake
           run: wake --init .
 
+        - name: Typecheck wake
+          run: wake -x 'Unit'
+
         - name: Check formatting
           run: wake-format --dry-run --auto
 
