@@ -1,0 +1,17 @@
+package result
+
+# When `result` is Fail, prefixes the internal error message with `prefix`
+#
+# Parameters:
+#  - `prefix`: The message to prepend to `result`
+#  - `result`: The Result which may be prepended to
+#
+# Examples:
+# ```
+#   prefixError "foo" (Pass 123) -> Pass 123
+#   prefixError "foo" (Fail (Error "bar" stack)) => Fail (Error "foobar" stack)
+# ```
+export def prefixError (prefix: String): (result: Result a Error) => Result a Error = match _
+    Pass r -> Pass r
+    Fail (Error msg stack) -> Fail (Error "{prefix}{msg}" stack)
+

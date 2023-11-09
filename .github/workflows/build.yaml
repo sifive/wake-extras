@@ -1,0 +1,35 @@
+name: "Run Tests"
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+    test:
+      runs-on: ubuntu-22.04
+      name: Run Tests
+      steps:
+        - name: Clone wake-extras
+          uses: actions/checkout@v3
+          with:
+            fetch-depth: 0
+
+        - name: Download wake
+          run: wget https://github.com/sifive/wake/releases/download/v39.1.0/ubuntu-22-04-wake_39.1.0-1_amd64.deb
+
+        - name: Install wake
+          run: sudo apt-get install ./ubuntu-22-04-wake_39.1.0-1_amd64.deb
+
+        - name: Initialize wake
+          run: wake --init .
+
+        - name: Typecheck wake
+          run: wake -x 'Unit'
+
+        - name: Check formatting
+          run: wake-format --dry-run --auto
+
+        - name: Run tests
+          run: ./tests/test.sh

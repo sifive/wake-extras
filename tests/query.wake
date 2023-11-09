@@ -1,0 +1,10 @@
+package tests
+
+from wake import _
+from query import _
+
+export def runQueryTests _ =
+    require 4, Nil = single 4
+    else failWithError "Unexpected value for single"
+
+    Pass Unit
