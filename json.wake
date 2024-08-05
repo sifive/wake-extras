@@ -458,6 +458,34 @@ export def jEditDouble (editFn: Double => Double): (input: JValue) => Result JVa
     jEditDoubleFn
     $ qPass editFn
 
+# Pass the data through unchanged, but add a breadcrumb to any error message corresponding to
+# the `getFn` being run on the contents of the indicated `index` in some array.
+#
+# This is handled automatically by library functions, but can be useful to call manually if a query
+# has been split into two parts, so that any context from the first part would be lost when running
+# the second.
+#
+# Example:
+# ```
+#   require Pass json =
+#       parseJSONBody '[{"foo": "bar"}, {"foo": 3}]'
+#   require Pass foo =
+#       query json
+#       $ jAt 0
+#       $ Pass
+#   require Pass _baseline = # Fails with "./foo: not an integer (got \"bar\")"
+#       query foo
+#       $ jField "foo"
+#       $ jInteger
+#   require Pass _annotated = # Fails with ".[0]/foo: not an integer (got \"bar\")"
+#       query foo
+#       $ jArrayAnnotation 0
+#       $ jField "foo"
+#       $ jInteger
+# ```
+export def jArrayAnnotation (index: Integer) (getFn: a => Result b QueryError) (input: a): Result b QueryError =
+    qPathAnnotation (PathIndex index) getFn input
+
 # A getter for JArray. Can be used to access an array in json.
 # Consider using jFlatten instead.
 #
@@ -640,6 +668,34 @@ export def jEditNullable (editFn: JValue => Result JValue QueryError): (input: J
         JNull -> Pass JNull
         input -> editFn input
 
+# Pass the data through unchanged, but add a breadcrumb to any error message corresponding to
+# the `getFn` being run on the contents of the indicated `field` in some object.
+#
+# This is handled automatically by library functions, but can be useful to call manually if a query
+# has been split into two parts, so that any context from the first part would be lost when running
+# the second.
+#
+# Example:
+# ```
+#   require Pass json =
+#       parseJSONBody '{"foo": ["bar", 3]}'
+#   require Pass foo =
+#       query json
+#       $ jField "foo"
+#       $ Pass
+#   require Pass _baseline = # Fails with ".[0]: not an integer (got \"bar\")"
+#       query foo
+#       $ jFlatten
+#       $ jInteger
+#   require Pass _annotated = # Fails with "./foo[0]: not an integer (got \"bar\")"
+#       query foo
+#       $ jFieldAnnotation "foo"
+#       $ jFlatten
+#       $ jInteger
+# ```
+export def jFieldAnnotation (field: String) (getFn: a => Result b QueryError) (input: a): Result b QueryError =
+    qPathAnnotation (PathSlash field) getFn input
+
 # A getter that pulls out one specific field of
 # a JObject. An error will be produced if the field
 # does not exist or if there are multiple copies of
@@ -661,7 +717,7 @@ export def jField (field: String) (getFn: JValue => Result a QueryError) (input:
     def helper = match _
         JObject pairs -> match (lookup (_ ==* field) pairs)
             Nil -> Fail "key {format field} not found".makeQueryError
-            x, Nil -> qPathAnnotation (PathSlash field) getFn x
+            x, Nil -> jFieldAnnotation field getFn x
             _ -> Fail "key {format field} found multiple times, expected only once".makeQueryError
         _ -> Fail "not an object {renderActualJValue input}".makeQueryError
 
@@ -693,7 +749,7 @@ def doJFieldPred (predicate: String => Boolean) (name: String) (getFn: JValue =>
                 Nil -> Fail "no keys matching {name} found".makeQueryError
                 _ ->
                     def getPairSecondFindFail (Pair field y) =
-                        require Pass ey = qPathAnnotation (PathSlash field) getFn y
+                        require Pass ey = jFieldAnnotation field getFn y
 
                         Pass ey
 
@@ -746,7 +802,7 @@ export def jFieldDefaultMany (field: String) (default: a) (getFn: JValue => Resu
     match input
         JObject pairs -> match (lookup (_ ==* field) pairs)
             Nil -> Pass default
-            x, Nil -> qPathAnnotation (PathSlash field) getFn x
+            x, Nil -> jFieldAnnotation field getFn x
             _ -> Fail "key {format field} found multiple times, expected only once".makeQueryError
         _ -> Fail "not an object {renderActualJValue input}".makeQueryError
 
@@ -803,7 +859,7 @@ export def jEditField (field: String) (editFn: JValue => Result JValue QueryErro
             def restResult = loop True rest
 
             # Edit the value
-            require Pass result = qPathAnnotation (PathSlash field) editFn value
+            require Pass result = jFieldAnnotation field editFn value
             require Pass editedRest = restResult
 
             Pass (Pair key result, editedRest)
@@ -993,7 +1049,7 @@ export def jPairs (getFn: JValue => Result (List a) QueryError) (input: JValue):
     match input
         JObject obj ->
             def getPair (Pair (k: String) (v: JValue)) =
-                require Pass value = qPathAnnotation (PathSlash k) getFn v
+                require Pass value = jFieldAnnotation k getFn v
 
                 map (Pair k) value
                 | Pass
@@ -1030,7 +1086,7 @@ export def jValues (getFn: JValue => Result (List a) QueryError) (input: JValue)
                 (Pair k v), rest ->
                     def newRestResults = helper rest
 
-                    require Pass newValue = qPathAnnotation (PathSlash k) getFn v
+                    require Pass newValue = jFieldAnnotation k getFn v
                     require Pass newRest = newRestResults
 
                     Pass (newValue ++ newRest)
